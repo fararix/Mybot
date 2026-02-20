@@ -81,10 +81,9 @@ async def callback_handler(event):
         data = load_data()
         btns = []
         for g_id in data['groups']:
-            # نمایش نام گروه یا آیدی برای تشخیص بهتر
             btns.append([Button.inline(f"Group: {g_id}", f"sel_add_g_{g_id}".encode())])
         btns.append([Button.inline("Back", b"main_menu")])
-        if len(btns) == 1: # فقط دکمه برگشت هست
+        if len(btns) == 1: 
             await event.answer("No groups found. Run /run in a group.", alert=True)
         else:
             await event.edit("Select Group to Add Admin:", buttons=btns)
@@ -104,7 +103,7 @@ async def callback_handler(event):
             if data['groups'][g_id]['admins']:
                 btns.append([Button.inline(f"Group: {g_id}", f"sel_del_g_{g_id}".encode())])
         btns.append([Button.inline("Back", b"main_menu")])
-        if len(btns) == 1: await event.answer("No admins found anywhere.", alert=True)
+        if len(btns) == 1: await event.answer("No admins found.", alert=True)
         else: await event.edit("Select Group to Remove Admin:", buttons=btns)
 
     elif cmd == "btn_list_admins":
@@ -120,7 +119,14 @@ async def callback_handler(event):
     elif cmd.startswith("sel_add_g_"):
         g_id = cmd.replace("sel_add_g_", "")
         conv_state[uid] = f"adding_admin_to|{g_id}"
-        await event.edit(f"✅ Group {g_id} selected.\n\n👇 **Now send one of these:**\n1. Forward a message from user\n2. Send User ID (Number)\n3. Send Username (@username)", buttons=[Button.inline("Cancel", b"main_menu")])
+        msg_text = (
+            f"✅ Group `{g_id}` selected.\n\n"
+            "👇 **You can send multiple users at once!**\n"
+            "Separate them with spaces or new lines.\n\n"
+            "Example:\n`123456789 @username 987654321`\n\n"
+            "Or just Forward a message."
+        )
+        await event.edit(msg_text, buttons=[Button.inline("Cancel", b"main_menu")])
 
     elif cmd.startswith("sel_del_g_"):
         g_id = cmd.replace("sel_del_g_", "")
@@ -152,7 +158,7 @@ async def callback_handler(event):
         for a in admins: txt += f"`{a}`\n"
         await event.edit(txt, buttons=[Button.inline("Back", b"main_menu")])
 
-# ================= INPUT HANDLER (UPDATED) =================
+# ================= INPUT HANDLER (BULK SUPPORT) =================
 @client.on(events.NewMessage)
 async def input_handler(event):
     if event.is_group: return 
@@ -161,52 +167,86 @@ async def input_handler(event):
 
     st = conv_state[uid]
     text = event.message.text
-    # Determine target based on context (forward vs text)
     target_id = str(event.message.forward.chat_id) if (event.message.forward and event.message.forward.chat_id) else text
 
     if st.startswith("adding_admin_to|"):
         g_id = st.split("|")[1]
         data = load_data()
         
-        # Check if group exists in DB
         if g_id not in data['groups']:
-             await event.reply("⚠️ Error: Group mismatch or deleted.")
+             await event.reply("⚠️ Error: Group mismatch.")
              return
 
-        new_admin_id = None
-        
-        # --- روش 1: فوروارد پیام ---
+        # Case 1: Single Forward
         if event.message.forward and event.message.forward.sender_id:
-            new_admin_id = event.message.forward.sender_id
-            
-        # --- روش 2: یوزرنیم (@username) ---
-        elif text.strip().startswith("@"):
-            try:
-                username = text.strip()
-                await event.reply(f"🔍 Searching for {username}...")
-                entity = await client.get_entity(username)
-                new_admin_id = entity.id
-            except Exception as e:
-                await event.reply(f"❌ Could not find username. Make sure it's correct.\nError: {e}")
-                return
-
-        # --- روش 3: آیدی عددی ---
-        elif text.strip().isdigit():
-            new_admin_id = int(text.strip())
-        
-        else:
-            await event.reply("⚠️ Please send a Forward, a Number, or a Username (@).")
+            new_id = event.message.forward.sender_id
+            if new_id not in data['groups'][g_id]['admins']:
+                data['groups'][g_id]['admins'].append(new_id)
+                save_data(data)
+                await event.reply(f"✅ User `{new_id}` added!", buttons=[Button.inline("Back", b"main_menu")])
+            else:
+                await event.reply("⚠️ Already admin.")
+            conv_state[uid] = None
             return
 
-        # اعمال تغییرات در دیتابیس
-        if new_admin_id:
-            if new_admin_id not in data['groups'][g_id]['admins']:
-                data['groups'][g_id]['admins'].append(new_admin_id)
-                save_data(data)
-                await event.reply(f"✅ User `{new_admin_id}` Added to Group `{g_id}`!", buttons=[Button.inline("Back to Menu", b"main_menu")])
-                conv_state[uid] = None
+        # Case 2: Bulk Text (IDs and Usernames)
+        # Replace newlines and commas with spaces, then split
+        items = text.replace('\n', ' ').replace(',', ' ').split()
+        
+        added_count = 0
+        failed_items = []
+        already_admin = 0
+
+        if not items:
+            await event.reply("⚠️ No ID or Username found.")
+            return
+
+        status_msg = await event.reply("⏳ Processing list...")
+
+        for item in items:
+            item = item.strip()
+            if not item: continue
+            
+            user_id = None
+            
+            # Resolve Username
+            if item.startswith("@"):
+                try:
+                    entity = await client.get_entity(item)
+                    user_id = entity.id
+                except:
+                    failed_items.append(f"{item} (Not found)")
+            
+            # Resolve Number
+            elif item.isdigit():
+                user_id = int(item)
+            
             else:
-                await event.reply(f"⚠️ User `{new_admin_id}` is ALREADY an admin.", buttons=[Button.inline("Back to Menu", b"main_menu")])
+                failed_items.append(f"{item} (Invalid format)")
+
+            # Add to DB
+            if user_id:
+                if user_id not in data['groups'][g_id]['admins']:
+                    data['groups'][g_id]['admins'].append(user_id)
+                    added_count += 1
+                else:
+                    already_admin += 1
+
+        save_data(data)
+        
+        # Report
+        report = f"📊 **Report for Group {g_id}:**\n\n"
+        report += f"✅ **Added:** {added_count}\n"
+        if already_admin > 0:
+            report += f"ℹ️ **Already Admin:** {already_admin}\n"
+        
+        if failed_items:
+            report += "\n❌ **Failed:**\n"
+            for fail in failed_items:
+                report += f"- {fail}\n"
+        
+        await status_msg.edit(report, buttons=[Button.inline("Back to Menu", b"main_menu")])
+        conv_state[uid] = None
 
     elif st == "wait_g_connect":
         conv_state[uid] = f"connecting_g|{target_id}"
